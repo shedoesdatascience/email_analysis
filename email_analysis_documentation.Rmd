@@ -1,5 +1,5 @@
 ---
-title: "ACONEX_Email_Analysis"
+title: "Email_Analysis"
 author: "Sheenal Srivastava"
 date: "10 March 2018"
 output: html_document
@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ## Overview
-The dataset consists of a set of files tracking the Aconex mail activity across multiple construction projects. All data has been anonymised.
+The dataset consists of a set of files tracking the mail activity across multiple construction projects. All data has been anonymised.
 The task was to explore the dataset and report back with any insights.
 Clients are concerned with project duration, as well as with the number of site instructions and variations seen on a project as these typically cost money.
 
