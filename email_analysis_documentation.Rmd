@@ -1,0 +1,246 @@
+---
+title: "ACONEX_Email_Analysis"
+author: "Sheenal Srivastava"
+date: "10 March 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+The dataset consists of a set of files tracking the Aconex mail activity across multiple construction projects. All data has been anonymised.
+The task was to explore the dataset and report back with any insights.
+Clients are concerned with project duration, as well as with the number of site instructions and variations seen on a project as these typically cost money.
+
+## Import and data ETL
+Firstly, correspondence data was read in and appended together. 
+The data was checked for duplicates. No duplicates were found. 
+
+As clients are concerned with **project duration**, the difference between response required by date and sent date was calculated in days. However, there were quite a few missing values for response required by date and some for sent date. These records were excluded so the dataset was reduced from 2,00,067,68 records for 7 variables to 3,895,037.
+
+Then, the  correspondence data was combined with mail types file to determine whether the type of correspondence has an impact on duration. 
+
+Finally, a file containing the number of records for each project was combined. 
+
+
+
+```{r}
+#Load libraries
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(data.table)
+library(tidyr)
+library(caret)
+library(h2o)
+#Import dataset
+manifest_file<-read_csv("C:\\Users\\sheen\\Downloads\\Data+science+-+test+(June+2017)\\Data science - test (June 2017)\\manifest.csv")
+
+mail_types_file<-read_csv("C:\\Users\\sheen\\Downloads\\Data+science+-+test+(June+2017)\\Data science - test (June 2017)\\mail_types.csv")
+
+
+
+
+
+# cd to the csv directory
+setwd("C:\\Users\\sheen\\Downloads\\Data+science+-+test+(June+2017)\\Data science - test (June 2017)\\correspondence_data\\")
+
+# ## read in csvs
+fnames <- dir("C:\\Users\\sheen\\Downloads\\Data+science+-+test+(June+2017)\\Data science - test (June 2017)\\correspondence_data\\", pattern = "csv")
+
+l <- lapply(fnames, fread, sep=",")
+dt <- rbindlist( l )
+setkey( dt , projectId)
+saveRDS(dt,"correspondence_data.rds")
+
+dt<-readRDS("correspondence_data.rds")
+```
+## Data transformation
+Variables calculated to understand project duration include duration in days and whether project was submitted after response required by date. If yes, then it was late, otherwise, it was early or on time. 
+
+```{r}
+unique_correspondonce_data<-unique(dt) #all unique records
+
+# dt<-readRDS("unique_correspondence.data.rds")
+
+
+#remove incomplete records as without responserequired by date, can't gauge duration
+
+
+
+unique_correspondonce_data.complete <- unique_correspondonce_data  %>% 
+  drop_na(responseRequiredByDate)
+
+ 
+
+unique_correspondonce_data.complete$sentDate<-ymd_hms(unique_correspondonce_data.complete$sentDate)
+
+unique_correspondonce_data.complete$responseRequiredByDate<- ymd_hms(unique_correspondonce_data.complete$responseRequiredByDate) 
+
+unique_correspondonce_data.complete<-unique_correspondonce_data.complete[!is.na(unique_correspondonce_data.complete$responseRequiredByDate),]
+
+#duration_days = response required by date - sent date 
+# if duration_days < 0, then late
+unique_correspondonce_data.complete$duration_days<-as.numeric(difftime(unique_correspondonce_data.complete$responseRequiredByDate,unique_correspondonce_data.complete$sentDate,tz="UTC",units="days"))
+
+unique_correspondonce_data.complete$submission_status<-as.factor(if_else(
+unique_correspondonce_data.complete$duration_days<0,"Late","Early or on time"))
+
+
+tmp1<-left_join(unique_correspondonce_data.complete,mail_types_file,by=c("correspondenceTypeId"="typeId"))
+
+tmp1$correspondenceId<-as.factor(tmp1$correspondenceId)
+
+tmp1$projectId<-as.factor(tmp1$projectId)
+
+tmp1$fromUserId<-as.factor(tmp1$fromUserId)
+tmp1$typeName<-as.factor(tmp1$typeName)
+
+tmp1$fromOrganizationId<-as.factor(tmp1$fromOrganizationId)
+manifest_file$projectId<-as.factor(manifest_file$projectId)
+
+tmp2<-left_join(tmp1,manifest_file,by=c("projectId"="projectId"))
+
+saveRDS(tmp2,"final_join.rds")
+```
+## Initial findings
+1. Correspondence id is unique so no aggregation required and will not assist analysis
+2. There are too many organisation ids - not useful predictor 
+3. There are too many userIDs - not useful predictor especially as some only have frequency count 1
+
+
+```{r}
+#for each projectId, for each type, count the number of late submission, number of early submissions and min, max, mean duration days
+tmp2$correspondenceTypeId<-as.factor(tmp2$correspondenceTypeId)
+tmp2$projectId<-as.factor(tmp2$projectId)
+
+#exclude records where dates are  "1900-01-01 UTC"
+grouped_tmp2<-tmp2 %>%
+group_by(projectId,correspondenceTypeId,typeName) %>%
+filter(duration_days!=-37107.00000) %>% 
+  summarise(mean_records = mean(records),
+  num_submissions_late = sum(submission_status=="Late"),
+  num_submissions_early_orontime = sum(submission_status=="Early or on time"),
+  avg_duration=mean(duration_days),
+  max_duration=max(duration_days,na.rm=TRUE),
+  min_duration=min(duration_days,na.rm=TRUE))
+```
+
+
+## Modelling
+Grouping the data reduced the dataset size to 51,156 observations for 7 variables. 
+The sample size at the moment is too small, however a large majority of the data was reduced due to missing response date and including every single record  per project Id, would be a comparison per organisation and user ID. It appears that the client is interested in site instructions and variations which can probably be found in correspondence type ID and typeName. Issue currently is we do not know what each ID stands for and whether it is important. 
+
+Two types of models were run: 
+GLM (Gaussian) that was carried out to determine the linear combination of best predictors that are likely to have an impact on the increase or decrease of average duration days. 
+
+GBM (Gaussian) was run to again identify the top predictors and how they are related to average project duration (days)
+```{r}
+## partition data to test and train datasets ####
+set.seed(1234)
+trainIndex <- createDataPartition(grouped_tmp2$avg_duration, p = .7, 
+                                  list = FALSE, 
+                                  times = 1)
+
+
+train = grouped_tmp2[trainIndex,]
+test = grouped_tmp2[-trainIndex,]
+
+# saveRDS(train, "./train.rds")
+# saveRDS(test, "./test.rds")
+exclude_cols = c("projectId", "max_duration","min_duration","num_submissions_late","num_submissions_early_orontime")
+
+ads_train<-train[ , !(names(train) %in% exclude_cols)]
+ads_test<-test[ , !(names(test) %in% exclude_cols)]
+
+
+
+localH2O <- h2o.init(nthreads = -1)
+ h2o.init()
+ 
+model_train.h2o <- as.h2o(ads_train)
+model_test.h2o <- as.h2o(ads_test)
+
+y_dv<- which(colnames(model_train.h2o)=="avg_duration")
+x_iv<-c(1:3)
+
+glm_model<-h2o.glm(y = y_dv, x = x_iv, training_frame = model_train.h2o, family = "gaussian",
+        nfolds = 0, alpha = 0.1, lambda_search = FALSE)
+
+variable.importance.list<-as.data.frame(h2o.varimp(glm_model))
+
+
+gbm_model<-h2o.gbm(y=y_dv,x=x_iv,training_frame = model_train.h2o,nfolds=5,distribution="gaussian")
+# saveRDS(glm_model, "./glm_model.rds")
+# saveRDS(gbm_model, "./gbm_model.rds")
+
+
+
+
+summary(glm_model)
+dev.off()
+graphics.off()
+par(mar=c(1,1,1,1))
+
+h2o.varimp_plot(glm_model, 30)
+
+summary(gbm_model)                   ## View information about the model.
+
+
+
+h2o.varimp_plot(gbm_model)
+#Though number of records did not come out as a significant predictor in the glm, it appears to the most important from the GBM, followed by correspondence type and type Name. 
+
+```
+## Results 
+
+Results show that of the 1500 predictors entered in the model (1500 due to binarisation of categorical variables) there are 672 predictors that have some degree of influence. 
+Only, 2 iterations were run despite the model having a choice of multiple runs to produce the best output. 
+
+The reason for this is because the best value of lambda was reached after two iterations giving a poor model accuracy score (goodness of fit score) of 0.38% R-squared. 
+
+The top 5 predictors which are likely to decrease project duration are: 
+
+                                 names coefficients sign
+1                      typeName.Facsimile    37.801224  NEG
+2                  correspondenceTypeId.7    37.801224  NEG
+3                 correspondenceTypeId.18    28.717825  NEG
+4 typeName.PM Request for Approval Sample    28.717825  NEG
+5                          typeName.Email    25.007748  NEG
+
+For every fax that is sent, project duration will decrease by about 38 days where all other predictors are held constant. 
+
+Factors that increase project duration include those that involve a non-conformance notice, payment claim or design query.
+
+
+## Plotting top predictors
+```{r}
+#histograms of top variables from glm
+
+#As seen in the below plot, for projects involving faxes, request for approval sample or emails, the project duration is usually less than zero meaning 
+l<-ads_train[ads_train$typeName %in% c("Facsimile","PM Request for Approval Sample","Email"),]
+         ggplot(l, aes(x=typeName, y=avg_duration, group=typeName)) + 
+          geom_boxplot(aes(fill=typeName))
+
+
+m<-ads_train[ads_train$typeName %in% c("Non Conformance Notice","Payment Claim","Design Query"),]
+         ggplot(m, aes(x=typeName, y=avg_duration, group=typeName)) + 
+          geom_boxplot(aes(fill=typeName))
+
+```
+
+# Conclusion
+Due to the model accuracy being so low, please see below for recommendations: 
+
+1.It is perhaps best to have data that is more complete or an idea of how the dates can be imputed with discussions with the client. 
+
+2. Include other sources of data to increase number of predictors. 
+
+3. Carry out insights analysis rather than predictive modelling to better understand the data. 
+
+4. Look at data over time to see whether there is a change in duration based on project and time (time series forecasting)
+
+
